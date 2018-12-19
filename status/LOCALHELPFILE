@@ -1,0 +1,10 @@
+unlock USER 解锁账户
+license FEATURE 看还剩下几个
+licenseuse FEATURE 看谁用的
+checkquota somuser 看磁盘空间限额
+checkquota somuser somevolume 看特定卷的磁盘空间限额
+hostnum host1 看某台机器的上运行任务数量
+hostload host2 看某台机器的CPU内存负载
+发送日志 某群: echo "<166>message to group" | nc -w3 -u X.X.X.X 514
+发送日志 群 echo "<158>message to group2" | nc -w3 -u X.X.X.X 514
+

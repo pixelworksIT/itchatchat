@@ -1,0 +1,143 @@
+#!/bin/bash
+##
+# Copyright 2018 Pixelworks Inc.
+#
+# Author: Cheng Chi <cchi@pixelworks.com>
+#
+# All exported commands in function style here
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#               http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+## // ##
+
+WORK=/home/POWERUSER/itchat/status
+LOCK=$WORK/lockme
+LICWORK=$WORK/licrpt2
+PRTG=$WORK/prtg
+BASTION="USER@SOMEHOST"
+# netapp 8.2.4
+storage1="storage1"
+storage2="storage2"
+# netapp new os
+storage3="storage3"
+###https://community.netapp.com/t5/Data-ONTAP-Discussions/Enabling-ssh-publickey-authenticaiton-on-Clustered-Data-ONTAP-for-Active/td-p/111250
+
+#find $LICWORK $PRTG $WORK/userpt -type f -mtime +1 -exec rm -rf {} \;
+find $LICWORK $PRTG $WORK/userpt -type f -cmin +360 -exec rm -rf {} \;
+
+LIC_LIST=(\
+3333@host1,3333@host2,3333@host3 \
+3332@host1,3332@host2,3332@host3 \
+)
+
+[ -f $LOCK ] && exit 0
+touch $LOCK
+
+
+LIC_NUM=${#LIC_LIST[@]}
+
+>$WORK/LIC.STStmp
+
+for (( i=0; i<${LIC_NUM}; i++));
+do
+ssh $BASTION "lmutil lmstat -a -c ${LIC_LIST[$i]}" > $WORK/$i.log
+cat $WORK/$i.log|grep -v unsupported|awk '/Users of / { print $3 " " $11 " of " $6" in used"}' >>$WORK/LIC.STStmp
+
+featurelist=$(cat $WORK/$i.log|awk '/Users of / {if ($11>0) print $3}')
+[ -z "$featurelist" ] && continue
+for j in `echo $featurelist |sed s/://g`
+do
+activelist=$(cat $WORK/$i.log |awk -v fea="Users of $j:" '$0~fea{flag=1;next}/Users of/{flag=0}flag'|grep start | awk '{print $1}'|sed s/pvg//g|sort )
+queuelist=$(cat $WORK/$i.log |awk -v fea="Users of $j:" '$0~fea{flag=1;next}/Users of/{flag=0}flag'|grep queued | awk '{print $1}'|sed s/pvg//g|sort )
+
+filename=`echo $j | awk '{print tolower($0)}'`
+echo $activelist > $LICWORK/$filename
+[ -z "$queuelist" ] || echo "Queued:$queuelist" >>$LICWORK/$filename
+
+
+
+done
+
+
+
+done
+cat $WORK/LIC.STStmp >$WORK/LIC.STS
+ssh $BASTION "(bhosts)" > $WORK/bhosts.log
+cat $WORK/bhosts.log|awk '$2=="ok" {print $1 " has " $6 " running jobs"}' >$WORK/bhosts.STS
+ssh $BASTION "(lsload)" > $WORK/lsload.log
+cat $WORK/lsload.log|awk '$2=="ok"{print $1 " CPU: " $4 " usage: " $6 " mem: " $12 }' >$WORK/lsload.STS
+ssh $BASTION "bjobs -u all" > $WORK/bjobs.log
+
+
+ssh $storage1 quota report >$WORK/$storage1.rpt
+ssh $storage2 quota report >$WORK/$storage2.rpt
+ssh $storage3 "set -units raw;quota report" >$WORK/$storage3.rpt
+
+# generate full user list at user.final
+(cat $WORK/$storage3.rpt |\
+awk '{if ( $3 ~ /user/ && $4 ~ /[A-Za-z]/ ) print $4}';\
+cat $WORK/$storage1.rpt $WORK/$storage2.rpt |\
+awk '{if ( $1 ~ /user/ && $2 ~ /[A-Za-z]/ ) print $2}')|\
+sort |uniq >$WORK/user.final
+
+rm -rf $WORK/userpt/userpt2.*
+rm -rf $WORK/userpt/userpt3.*
+
+for i in `cat $WORK/user.final`
+do
+
+#userpt1 contains each user all volume percentage, volume name, used, quota
+cat $WORK/$storage1.rpt | awk -v i="$i" '{if ( $1 ~ /user/ && $2 ~ i && $4 !~ /-/ && $6 !~ /-/ ) {print 100*$5/$6 " " $4 " " $5*1024 " "$6*1024}}' > $WORK/userpt/userpt1.$i
+cat $WORK/$storage2.rpt | awk -v i="$i" '{if ( $1 ~ /user/ && $2 ~ i && $4 !~ /-/ && $6 !~ /-/ ) {print 100*$5/$6 " " $4 " " $5*1024 " "$6*1024}}' >> $WORK/userpt/userpt1.$i
+cat $WORK/$storage3.rpt | awk -v i="$i" '{if ( $3 ~ /user/ && $4 ~ i && $6 !~ /-/) {print 100*$5/$6 " " $2 " " $5 " "$6}}' >> $WORK/userpt/userpt1.$i
+
+
+#user2 contains each user top 5 full volume
+cat $WORK/userpt/userpt1.$i|sort -nr |head -5 >$WORK/userpt/user2.$i
+
+#userpt3, make human readable
+while IFS= read -r line
+do
+        # display $line or do somthing with $line
+#	printf '%s\n' "$line"
+userarray=(`echo "$line" | awk '{print $2 " " $3 " " $4 }'`)
+#used=`echo $((userarray[1]*1024)) |numfmt --to=iec`
+#total=`echo $((userarray[2]*1024)) |numfmt --to=iec`
+used=`echo ${userarray[1]} |numfmt --to=iec`
+total=`echo ${userarray[2]} |numfmt --to=iec`
+printf "%s: %s/%s \n" ${userarray[0]} $used $total >> $WORK/userpt/userpt3.$i
+done <"$WORK/userpt/user2.$i"
+
+#userpt4,  display quota for each volume and user in indvidual file
+while IFS= read -r line
+do
+        # display $line or do somthing with $line
+#       printf '%s\n' "$line"
+userarray=(`echo "$line" | awk '{print $2 " " $3 " " $4 }'`)
+used=`echo ${userarray[1]} |numfmt --to=iec`
+total=`echo ${userarray[2]} |numfmt --to=iec`
+printf "%s: %s/%s \n" ${userarray[0]} $used $total > $WORK/userpt/userpt4.$i${userarray[0]}
+done <"$WORK/userpt/userpt1.$i"
+
+done
+
+# download public PRTG images
+while IFS= read -r line
+do
+filename=$(echo $line|awk '{print $1}')
+URL=$(echo $line|awk '{print $2}')
+curl -s $URL >$PRTG/$filename.png
+
+done <"$WORK/PRTGURL"
+
+rm -rf $LOCK
